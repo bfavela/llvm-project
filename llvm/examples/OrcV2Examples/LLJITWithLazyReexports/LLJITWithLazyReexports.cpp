@@ -52,6 +52,14 @@ const llvm::StringRef FooMod =
   }
 )";
 
+const llvm::StringRef TargetMod =
+    R"(
+  define i32 @target_body() {
+  entry:
+    ret i32 1
+  }
+)";
+
 const llvm::StringRef BarMod =
     R"(
   define i32 @bar_body() {
@@ -60,26 +68,20 @@ const llvm::StringRef BarMod =
   }
 )";
 
+const llvm::StringRef ThreadIDMod =
+    R"(
+  define i32 @threadid_body(i32 %op, i32 %channel) {
+  entry:
+    ret i32 %channel
+  }
+)";
+
 const llvm::StringRef MainMod =
     R"(
 
   define i32 @entry(i32 %argc) {
-  entry:
-    %and = and i32 %argc, 1
-    %tobool = icmp eq i32 %and, 0
-    br i1 %tobool, label %if.end, label %if.then
-
-  if.then:                                          ; preds = %entry
     %call = tail call i32 @foo() #2
-    br label %return
-
-  if.end:                                           ; preds = %entry
-    %call1 = tail call i32 @bar() #2
-    br label %return
-
-  return:                                           ; preds = %if.end, %if.then
-    %retval.0 = phi i32 [ %call, %if.then ], [ %call1, %if.end ]
-    ret i32 %retval.0
+    ret i32 %call
   }
 
   declare i32 @foo()
@@ -125,19 +127,31 @@ int main(int argc, char *argv[]) {
       J->getTargetTriple(), J->getExecutionSession(), ExecutorAddr()));
 
   // (4) Add modules.
-  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(FooMod, "foo-mod"))));
+  ExitOnErr(J->addIRModule(
+      ExitOnErr(parseExampleModuleFromFile("C:/work/foofoo.ll"))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(BarMod, "bar-mod"))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(MainMod, "main-mod"))));
+  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(TargetMod, "target-mod"))));
+  ExitOnErr(J->addIRModule(
+      ExitOnErr(parseExampleModule(ThreadIDMod, "threadid-mod"))));
 
   // (5) Add lazy reexports.
   MangleAndInterner Mangle(J->getExecutionSession(), J->getDataLayout());
   SymbolAliasMap ReExports(
-      {{Mangle("foo"),
+      {{Mangle("dx.op.threadId.i32"),
+        {Mangle("threadid_body"),
+         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
+       {Mangle("foo"),
         {Mangle("foo_body"),
          JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
        {Mangle("bar"),
         {Mangle("bar_body"),
-         JITSymbolFlags::Exported | JITSymbolFlags::Callable}}});
+         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
+      {Mangle("target"),
+       {Mangle("target_body"),
+        JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
+  }
+  );
   ExitOnErr(J->getMainJITDylib().define(
       lazyReexports(*LCTM, *ISM, J->getMainJITDylib(), std::move(ReExports))));
 
