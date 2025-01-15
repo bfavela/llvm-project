@@ -27,13 +27,87 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 
-#include "../ExampleModules.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/SourceMgr.h"
+
+#include "llvm/IR/PassManager.h"
+#include "llvm/InitializePasses.h"
+#include "llvm/Pass.h"
+#include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "dxil_parsing"
+
+void initializeDxilParsingPass(PassRegistry &);
+
+namespace {
+  struct DxilParsing : public FunctionPass {
+    const TargetTransformInfo *TTI;
+
+    static char ID; // Pass identification, replacement for typeid
+    DxilParsing() : FunctionPass(ID) {
+      initializeDxilParsingPass(*PassRegistry::getPassRegistry());
+    }
+
+    void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+    bool runOnFunction(Function &F) override;
+  };
+}
+
+char DxilParsing::ID = 0;
+
+INITIALIZE_PASS(DxilParsing, "DxilParsing",
+                      "DXIL Parsing", false, false)
+
+FunctionPass *myCoolPass() {
+  return new DxilParsing();
+}
+
 using namespace llvm::orc;
 
 ExitOnError ExitOnErr;
+
+inline llvm::Error createSMDiagnosticError(llvm::SMDiagnostic &Diag) {
+  using namespace llvm;
+  std::string Msg;
+  {
+    raw_string_ostream OS(Msg);
+    Diag.print("", OS);
+  }
+  return make_error<StringError>(std::move(Msg), inconvertibleErrorCode());
+}
+inline llvm::Expected<llvm::orc::ThreadSafeModule>
+parseExampleModule(llvm::StringRef Source, llvm::StringRef Name) {
+  using namespace llvm;
+  auto Ctx = std::make_unique<LLVMContext>();
+  SMDiagnostic Err;
+  if (auto M = parseIR(MemoryBufferRef(Source, Name), Err, *Ctx))
+    return orc::ThreadSafeModule(std::move(M), std::move(Ctx));
+
+  return createSMDiagnosticError(Err);
+}
+
+inline llvm::Expected<llvm::orc::ThreadSafeModule>
+parseExampleModuleFromFile(llvm::StringRef FileName) {
+  using namespace llvm;
+  auto Ctx = std::make_unique<LLVMContext>();
+  SMDiagnostic Err;
+
+  if (auto M = parseIRFile(FileName, Err, *Ctx))
+    return orc::ThreadSafeModule(std::move(M), std::move(Ctx));
+
+  return createSMDiagnosticError(Err);
+}
 
 // Example IR modules.
 //
@@ -88,6 +162,31 @@ const llvm::StringRef MainMod =
   declare i32 @bar()
 )";
 
+// A function object that creates a simple pass pipeline to apply to each
+// module as it passes through the IRTransformLayer.
+class MyOptimizationTransform {
+public:
+  MyOptimizationTransform() : PM(std::make_unique<PassManager>()) {
+    PM->add(createTailCallEliminationPass());
+    PM->add(createCFGSimplificationPass());
+    PM->add(myCoolPass());
+  }
+
+  Expected<ThreadSafeModule> operator()(ThreadSafeModule TSM,
+                                        MaterializationResponsibility &R) {
+    TSM.withModuleDo([this](Module &M) {
+      dbgs() << "--- BEFORE OPTIMIZATION ---\n" << M << "\n";
+      PM->run(M);
+      dbgs() << "--- AFTER OPTIMIZATION ---\n" << M << "\n";
+    });
+    return std::move(TSM);
+  }
+
+private:
+  std::unique_ptr<PassManager> PM;
+};
+
+
 cl::list<std::string> InputArgv(cl::Positional,
                                 cl::desc("<program arguments>..."));
 
@@ -104,13 +203,16 @@ int main(int argc, char *argv[]) {
   // (1) Create LLJIT instance.
   auto J = ExitOnErr(LLJITBuilder().create());
 
+  // (2) Install transform to optimize modules when they're materialized.
+  J->getIRTransformLayer().setTransform(MyOptimizationTransform());
+
   // (2) Install transform to print modules as they are compiled:
-  J->getIRTransformLayer().setTransform(
-      [](ThreadSafeModule TSM,
-         const MaterializationResponsibility &R) -> Expected<ThreadSafeModule> {
-        TSM.withModuleDo([](Module &M) { dbgs() << "---Compiling---\n" << M; });
-        return std::move(TSM); // Not a redundant move: fix build on gcc-7.5
-      });
+  // J->getIRTransformLayer().setTransform(
+  //     [](ThreadSafeModule TSM,
+  //        const MaterializationResponsibility &R) -> Expected<ThreadSafeModule> {
+  //       TSM.withModuleDo([](Module &M) { dbgs() << "---Compiling---\n" << M; });
+  //       return std::move(TSM); // Not a redundant move: fix build on gcc-7.5
+  //     });
 
   // (3) Create stubs and call-through managers:
   std::unique_ptr<IndirectStubsManager> ISM;
@@ -128,7 +230,7 @@ int main(int argc, char *argv[]) {
 
   // (4) Add modules.
   ExitOnErr(J->addIRModule(
-      ExitOnErr(parseExampleModuleFromFile("C:/work/foofoo.ll"))));
+      ExitOnErr(parseExampleModuleFromFile(argv[1]))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(BarMod, "bar-mod"))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(MainMod, "main-mod"))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(TargetMod, "target-mod"))));
