@@ -37,7 +37,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SourceMgr.h"
 
-#include "llvm/IR/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/IPO.h"
@@ -47,7 +47,9 @@ using namespace llvm;
 
 #define DEBUG_TYPE "dxil_parsing"
 
+namespace llvm {
 void initializeDxilParsingPass(PassRegistry &);
+}
 
 namespace {
   struct DxilParsing : public FunctionPass {
@@ -58,10 +60,15 @@ namespace {
       initializeDxilParsingPass(*PassRegistry::getPassRegistry());
     }
 
-    void getAnalysisUsage(AnalysisUsage &AU) const override;
+    void getAnalysisUsage(AnalysisUsage &AU) const override {}
 
     bool runOnFunction(Function &F) override;
   };
+}
+
+bool DxilParsing::runOnFunction(Function &F) {
+  llvm_unreachable("Foo?");
+  return true;
 }
 
 char DxilParsing::ID = 0;
@@ -69,8 +76,11 @@ char DxilParsing::ID = 0;
 INITIALIZE_PASS(DxilParsing, "DxilParsing",
                       "DXIL Parsing", false, false)
 
-FunctionPass *myCoolPass() {
+namespace llvm {
+// Public interface to the TailCallElimination pass
+FunctionPass *createDxilParsingPass() {
   return new DxilParsing();
+}
 }
 
 using namespace llvm::orc;
@@ -166,10 +176,10 @@ const llvm::StringRef MainMod =
 // module as it passes through the IRTransformLayer.
 class MyOptimizationTransform {
 public:
-  MyOptimizationTransform() : PM(std::make_unique<PassManager>()) {
+  MyOptimizationTransform() : PM(std::make_unique<legacy::PassManager>()) {
     PM->add(createTailCallEliminationPass());
     PM->add(createCFGSimplificationPass());
-    PM->add(myCoolPass());
+    PM->add(createDxilParsingPass());
   }
 
   Expected<ThreadSafeModule> operator()(ThreadSafeModule TSM,
@@ -182,8 +192,8 @@ public:
     return std::move(TSM);
   }
 
-private:
-  std::unique_ptr<PassManager> PM;
+//private:
+  std::unique_ptr<legacy::PassManager> PM;
 };
 
 

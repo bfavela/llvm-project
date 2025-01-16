@@ -10,6 +10,7 @@ set(LLVM_LINK_COMPONENTS
   Core
   IPO
   IRReader
+  Passes
   AggressiveInstCombine
   InstCombine
   Instrumentation
@@ -30,4 +31,10 @@ set(LLVM_LINK_COMPONENTS
 
 add_llvm_tool(irsim
   IRSIM.cpp
+
+  DEPENDS
+  intrinsics_gen
+  SUPPORT_PLUGINS
   )
+
+export_executable_symbols_for_plugins(irsim)
