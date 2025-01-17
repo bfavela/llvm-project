@@ -66,9 +66,41 @@ namespace {
   };
 }
 
+#include "llvm/IR/InstVisitor.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/InstIterator.h"
+#include <iostream>
+//#include ""
+
+
+namespace {
+class DxilVisitor : public InstVisitor<DxilVisitor> {
+public:
+  bool processFunction(Function &F) {
+    for (auto &I : instructions(F)) {
+      visit(I);
+    }
+    return true;
+  }
+  void visit(Instruction &I) {
+    I.print(dbgs());
+    std::cout << "\n";
+    if (LoadInst *load = dyn_cast<LoadInst>(&I)) {
+      printf("It's a load!\n");
+      if (load->getType()->isTargetExtTy()) {
+        load->mutateType(Type::getInt32Ty(I.getContext()));
+      }
+      load->print(dbgs());
+      std::cout << "\n";
+//      exit(0);
+    }
+  };
+};
+}
+
 bool DxilParsing::runOnFunction(Function &F) {
-  llvm_unreachable("Foo?");
-  return true;
+  DxilVisitor V;
+  return V.processFunction(F);
 }
 
 char DxilParsing::ID = 0;
@@ -200,6 +232,19 @@ public:
 cl::list<std::string> InputArgv(cl::Positional,
                                 cl::desc("<program arguments>..."));
 
+int dx_bufferload_impl(int index)
+{
+  return index * 2;
+}
+
+const llvm::StringRef BufferLoadMod =
+    R"(
+  define i32 @dx_bufferload_body(i32 %op, %dx.types.Handle ptr, i32 %a, i32 %b) {
+  entry:
+    ret i32 dx_bufferload_impl(%index)
+  }
+)";
+
 int main(int argc, char *argv[]) {
   // Initialize LLVM.
   InitLLVM X(argc, argv);
@@ -243,7 +288,9 @@ int main(int argc, char *argv[]) {
       ExitOnErr(parseExampleModuleFromFile(argv[1]))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(BarMod, "bar-mod"))));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(MainMod, "main-mod"))));
-  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(TargetMod, "target-mod"))));
+  ExitOnErr(
+      J->addIRModule(ExitOnErr(parseExampleModule(TargetMod, "target-mod"))));
+  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModuleFromFile("dxil_bufferload.ll"))));
   ExitOnErr(J->addIRModule(
       ExitOnErr(parseExampleModule(ThreadIDMod, "threadid-mod"))));
 
@@ -253,6 +300,12 @@ int main(int argc, char *argv[]) {
       {{Mangle("dx.op.threadId.i32"),
         {Mangle("threadid_body"),
          JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
+      {Mangle("dx.op.bufferLoad.i32"),
+       {Mangle("dx_bufferload_body"),
+        JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
+      {Mangle("dx.op.bufferStore.i32"),
+       {Mangle("dx_bufferstore_body"),
+        JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
        {Mangle("foo"),
         {Mangle("foo_body"),
          JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
