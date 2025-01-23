@@ -35,6 +35,8 @@ add_llvm_tool(irsim
   DEPENDS
   intrinsics_gen
   SUPPORT_PLUGINS
+
+  EXPORT_SYMBOLS
   )
 
 export_executable_symbols_for_plugins(irsim)

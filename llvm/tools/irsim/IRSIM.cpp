@@ -20,28 +20,35 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/InitializePasses.h"
+#include "llvm/Pass.h"
+#include "llvm/Transforms/Scalar.h"
+
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringMap.h"
+
 #include "llvm/ExecutionEngine/JITLink/JITLinkMemoryManager.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
+
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstVisitor.h"
+
+#include "llvm/IRReader/IRReader.h"
+
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
-
-#include "llvm/ADT/StringRef.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SourceMgr.h"
 
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/InitializePasses.h"
-#include "llvm/Pass.h"
-#include "llvm/Transforms/IPO.h"
-#include "llvm/Transforms/Scalar.h"
+#include <iostream>
 
 using namespace llvm;
 
@@ -65,13 +72,6 @@ namespace {
     bool runOnFunction(Function &F) override;
   };
 }
-
-#include "llvm/IR/InstVisitor.h"
-#include "llvm/IR/DebugInfo.h"
-#include "llvm/IR/InstIterator.h"
-#include <iostream>
-//#include ""
-
 
 namespace {
 class DxilVisitor : public InstVisitor<DxilVisitor> {
@@ -160,38 +160,6 @@ parseExampleModuleFromFile(llvm::StringRef FileName) {
 // to re-use cached objects between static and JIT compiles) techniques exist to
 // avoid renaming. See the lazy-reexports section of the ORCv2 design doc.
 
-const llvm::StringRef FooMod =
-    R"(
-  define i32 @foo_body() {
-  entry:
-    ret i32 1
-  }
-)";
-
-const llvm::StringRef TargetMod =
-    R"(
-  define i32 @target_body() {
-  entry:
-    ret i32 1
-  }
-)";
-
-const llvm::StringRef BarMod =
-    R"(
-  define i32 @bar_body() {
-  entry:
-    ret i32 2
-  }
-)";
-
-const llvm::StringRef ThreadIDMod =
-    R"(
-  define i32 @threadid_body(i32 %op, i32 %channel) {
-  entry:
-    ret i32 %channel
-  }
-)";
-
 const llvm::StringRef MainMod =
     R"(
 
@@ -231,19 +199,12 @@ public:
 
 cl::list<std::string> InputArgv(cl::Positional,
                                 cl::desc("<program arguments>..."));
+#include <cstdio>
 
-int dx_bufferload_impl(int index)
-{
-  return index * 2;
+static int dx_bufferload_impl(int index) {
+   printf("foo");
+   return index * 2;
 }
-
-const llvm::StringRef BufferLoadMod =
-    R"(
-  define i32 @dx_bufferload_body(i32 %op, %dx.types.Handle ptr, i32 %a, i32 %b) {
-  entry:
-    ret i32 dx_bufferload_impl(%index)
-  }
-)";
 
 int main(int argc, char *argv[]) {
   // Initialize LLVM.
@@ -255,8 +216,24 @@ int main(int argc, char *argv[]) {
   cl::ParseCommandLineOptions(argc, argv, "LLJITWithLazyReexports");
   ExitOnErr.setBanner(std::string(argv[0]) + ": ");
 
+  // Detect the host and set code model to small.
+  auto JTMB = ExitOnErr(JITTargetMachineBuilder::detectHost());
+  JTMB.setCodeModel(CodeModel::Small);
+
+  auto DL = ExitOnErr(JTMB.getDefaultDataLayoutForTarget());
+  auto ProcessSymbolsSearchGenerator =
+      ExitOnErr(DynamicLibrarySearchGenerator::GetForCurrentProcess(
+          DL.getGlobalPrefix()));
+
   // (1) Create LLJIT instance.
-  auto J = ExitOnErr(LLJITBuilder().create());
+  auto J = ExitOnErr(LLJITBuilder()
+          .setJITTargetMachineBuilder(std::move(JTMB))
+          .setObjectLinkingLayerCreator(
+              [&](ExecutionSession &ES, const Triple &TT) {
+                return std::make_unique<ObjectLinkingLayer>(
+                    ES, ExitOnErr(jitlink::InProcessMemoryManager::Create()));
+              })
+          .create());
 
   // (2) Install transform to optimize modules when they're materialized.
   J->getIRTransformLayer().setTransform(MyOptimizationTransform());
@@ -284,39 +261,44 @@ int main(int argc, char *argv[]) {
       J->getTargetTriple(), J->getExecutionSession(), ExecutorAddr()));
 
   // (4) Add modules.
-  ExitOnErr(J->addIRModule(
-      ExitOnErr(parseExampleModuleFromFile(argv[1]))));
-  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(BarMod, "bar-mod"))));
+  auto TSM1 = ExitOnErr(parseExampleModuleFromFile(argv[1]));
+  auto M = TSM1.getModuleUnlocked();
+  NamedMDNode *dx_entryPoints = M->getNamedMetadata("dx.entryPoints");
+  const MDOperand &entry = dx_entryPoints->getOperand(0)->getOperand(1);
+  
+  if (!isa<MDString>(entry.get())) {
+    ExitOnErr(
+        make_error<StringError>("Could not find dx.entryPoints in DXIL file",
+                                inconvertibleErrorCode()));
+  }
+
+  auto entry_name = cast<MDString>(entry.get())->getString();
+  ExitOnErr(J->addIRModule(std::move(TSM1)));
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModule(MainMod, "main-mod"))));
-  ExitOnErr(
-      J->addIRModule(ExitOnErr(parseExampleModule(TargetMod, "target-mod"))));
-  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModuleFromFile("dxil_bufferload.ll"))));
-  ExitOnErr(J->addIRModule(
-      ExitOnErr(parseExampleModule(ThreadIDMod, "threadid-mod"))));
+  ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModuleFromFile("c:\\work\\dxil_bufferload.ll"))));
 
   // (5) Add lazy reexports.
   MangleAndInterner Mangle(J->getExecutionSession(), J->getDataLayout());
-  SymbolAliasMap ReExports(
-      {{Mangle("dx.op.threadId.i32"),
-        {Mangle("threadid_body"),
-         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
+  SymbolAliasMap ReExports({
+      {Mangle("dx.op.threadId.i32"),
+       {Mangle("threadid_body"),
+        JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
       {Mangle("dx.op.bufferLoad.i32"),
        {Mangle("dx_bufferload_body"),
         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
       {Mangle("dx.op.bufferStore.i32"),
        {Mangle("dx_bufferstore_body"),
         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
-       {Mangle("foo"),
-        {Mangle("foo_body"),
-         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
-       {Mangle("bar"),
-        {Mangle("bar_body"),
-         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
-      {Mangle("target"),
-       {Mangle("target_body"),
+      {Mangle("foo"),
+       {Mangle(entry_name),
         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
   }
   );
+  J->getMainJITDylib().addGenerator(std::move(ProcessSymbolsSearchGenerator));
+  dbgs() << "---Session state before---\n";
+  J->getExecutionSession().dump(dbgs());
+  dbgs() << "\n";
+
   ExitOnErr(J->getMainJITDylib().define(
       lazyReexports(*LCTM, *ISM, J->getMainJITDylib(), std::move(ReExports))));
 
