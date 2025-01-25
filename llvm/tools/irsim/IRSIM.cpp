@@ -220,11 +220,6 @@ int main(int argc, char *argv[]) {
   auto JTMB = ExitOnErr(JITTargetMachineBuilder::detectHost());
   JTMB.setCodeModel(CodeModel::Small);
 
-  auto DL = ExitOnErr(JTMB.getDefaultDataLayoutForTarget());
-  auto ProcessSymbolsSearchGenerator =
-      ExitOnErr(DynamicLibrarySearchGenerator::GetForCurrentProcess(
-          DL.getGlobalPrefix()));
-
   // (1) Create LLJIT instance.
   auto J = ExitOnErr(LLJITBuilder()
           .setJITTargetMachineBuilder(std::move(JTMB))
@@ -234,6 +229,15 @@ int main(int argc, char *argv[]) {
                     ES, ExitOnErr(jitlink::InProcessMemoryManager::Create()));
               })
           .create());
+
+  const DataLayout &DL = J->getDataLayout();
+  MangleAndInterner Mangle(J->getExecutionSession(), DL);
+  DenseSet<SymbolStringPtr> AllowList({Mangle("dx_bufferload_impl")});
+
+  auto ProcessSymbolsSearchGenerator =
+      ExitOnErr(DynamicLibrarySearchGenerator::GetForCurrentProcess(
+          DL.getGlobalPrefix(),
+          [&](const SymbolStringPtr &S) { return AllowList.count(S); }));
 
   // (2) Install transform to optimize modules when they're materialized.
   J->getIRTransformLayer().setTransform(MyOptimizationTransform());
@@ -278,7 +282,7 @@ int main(int argc, char *argv[]) {
   ExitOnErr(J->addIRModule(ExitOnErr(parseExampleModuleFromFile("c:\\work\\dxil_bufferload.ll"))));
 
   // (5) Add lazy reexports.
-  MangleAndInterner Mangle(J->getExecutionSession(), J->getDataLayout());
+//  MangleAndInterner Mangle(J->getExecutionSession(), J->getDataLayout());
   SymbolAliasMap ReExports({
       {Mangle("dx.op.threadId.i32"),
        {Mangle("threadid_body"),

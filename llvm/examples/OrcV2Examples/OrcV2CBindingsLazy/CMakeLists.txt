@@ -12,4 +12,5 @@ set(LLVM_LINK_COMPONENTS
 
 add_llvm_example(OrcV2CBindingsLazy
   OrcV2CBindingsLazy.c
+  EXPORT_SYMBOLS
   )

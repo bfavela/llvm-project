@@ -31,10 +31,16 @@ int handleError(LLVMErrorRef Err) {
 // to re-use cached objects between static and JIT compiles) techniques exist to
 // avoid renaming. See the lazy-reexports section of the ORCv2 design doc.
 
+int myfunc() { return 42; }
+
 const char FooMod[] = "  define i32 @foo_body() { \n"
                       "  entry:                   \n"
-                      "    ret i32 1              \n"
-                      "  }                        \n";
+                      "    %call = call i32 @myfunc()\n"
+                      "    ret i32 %call          \n"
+                      //"    ret i32 1          \n"
+                      "  }                        \n"
+                      " declare i32 @myfunc()\n"
+                      ;
 
 const char BarMod[] = "  define i32 @bar_body() { \n"
                       "  entry:                   \n"
@@ -196,6 +202,12 @@ int main(int argc, const char *argv[]) {
     LLVMOrcMaterializationUnitRef MU =
         LLVMOrcLazyReexports(LCTM, ISM, MainJD, ReExports, 2);
     LLVMOrcJITDylibDefine(MainJD, MU);
+  }
+  {
+    LLVMOrcJITDylibRef MainJD = LLVMOrcLLJITGetMainJITDylib(J);
+    LLVMOrcJITDylibAddGenerator(
+        MainJD, LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
+                    TargetTriple, LLVMOrcLLJITGetGlobalPrefix(J), 0, 0));
   }
 
   // Look up the address of our demo entry point.

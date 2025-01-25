@@ -1069,17 +1069,20 @@ LLJIT::LLJIT(LLJITBuilderState &S, Error &Err)
 
   if (auto PlatformJDOrErr = S.SetUpPlatform(*this)) {
     Platform = PlatformJDOrErr->get();
-    if (Platform)
-      DefaultLinks.push_back(
-          {Platform, JITDylibLookupFlags::MatchExportedSymbolsOnly});
+    if (Platform) {
+      DefaultLinks.push_back({Platform, JITDylibLookupFlags::MatchAllSymbols});
+      Platform->dump(dbgs());
+    }
   } else {
     Err = PlatformJDOrErr.takeError();
     return;
   }
 
-  if (S.LinkProcessSymbolsByDefault)
+  if (S.LinkProcessSymbolsByDefault) {
     DefaultLinks.push_back(
-        {ProcessSymbols, JITDylibLookupFlags::MatchExportedSymbolsOnly});
+        {ProcessSymbols, JITDylibLookupFlags::MatchAllSymbols});
+    ProcessSymbols->dump(dbgs());
+  }
 
   if (auto MainOrErr = createJITDylib("main"))
     Main = &*MainOrErr;
