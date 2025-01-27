@@ -31,6 +31,7 @@
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
+#include "llvm/ExecutionEngine/Orc/EPCDynamicLibrarySearchGenerator.h"
 
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -201,10 +202,7 @@ cl::list<std::string> InputArgv(cl::Positional,
                                 cl::desc("<program arguments>..."));
 #include <cstdio>
 
-static int dx_bufferload_impl(int index) {
-   printf("foo");
-   return index * 2;
-}
+#include "llvm/Support/Path.h"
 
 int main(int argc, char *argv[]) {
   // Initialize LLVM.
@@ -223,21 +221,15 @@ int main(int argc, char *argv[]) {
   // (1) Create LLJIT instance.
   auto J = ExitOnErr(LLJITBuilder()
           .setJITTargetMachineBuilder(std::move(JTMB))
-          .setObjectLinkingLayerCreator(
-              [&](ExecutionSession &ES, const Triple &TT) {
-                return std::make_unique<ObjectLinkingLayer>(
-                    ES, ExitOnErr(jitlink::InProcessMemoryManager::Create()));
-              })
           .create());
 
   const DataLayout &DL = J->getDataLayout();
   MangleAndInterner Mangle(J->getExecutionSession(), DL);
-  DenseSet<SymbolStringPtr> AllowList({Mangle("dx_bufferload_impl")});
 
+  
   auto ProcessSymbolsSearchGenerator =
-      ExitOnErr(DynamicLibrarySearchGenerator::GetForCurrentProcess(
-          DL.getGlobalPrefix(),
-          [&](const SymbolStringPtr &S) { return AllowList.count(S); }));
+      ExitOnErr(EPCDynamicLibrarySearchGenerator::Load(J->getExecutionSession(),
+                                                       "llvmdxil_impl.dll"));
 
   // (2) Install transform to optimize modules when they're materialized.
   J->getIRTransformLayer().setTransform(MyOptimizationTransform());
@@ -298,7 +290,10 @@ int main(int argc, char *argv[]) {
         JITSymbolFlags::Exported | JITSymbolFlags::Callable}},
   }
   );
-  J->getMainJITDylib().addGenerator(std::move(ProcessSymbolsSearchGenerator));
+  llvm::orc::JITDylib& PSSGlib =
+    J->getExecutionSession().createBareJITDylib("PSSGlib");
+  PSSGlib.addGenerator(std::move(ProcessSymbolsSearchGenerator));
+  J->getMainJITDylib().addToLinkOrder(PSSGlib);
   dbgs() << "---Session state before---\n";
   J->getExecutionSession().dump(dbgs());
   dbgs() << "\n";

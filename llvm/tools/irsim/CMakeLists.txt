@@ -1,3 +1,5 @@
+add_subdirectory(dxil)
+
 set(LLVM_LINK_COMPONENTS
   AllTargetsAsmParsers
   AllTargetsCodeGens
@@ -27,6 +29,7 @@ set(LLVM_LINK_COMPONENTS
   IRReader
   OrcJIT
   nativecodegen
+  dxil_impl
   )
 
 add_llvm_tool(irsim
